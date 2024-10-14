@@ -3,16 +3,14 @@ import cors from 'cors';
 import mysql from 'mysql2/promise';
 import fs from 'fs';
 import axios from 'axios';
-import { CronJob } from 'cron';
 import path from 'path';
-import { PDFDocument } from 'pdf-lib'; // Mantieni solo pdf-lib
-import { dirname } from 'path';
-import { createCanvas, loadImage } from 'canvas'; // Assicurati di importare anche createCanvas
-import { fileURLToPath } from 'url'; // Importa fileURLToPath
-import tesseract from 'tesseract.js';
+import { fileURLToPath } from 'url';
+import { CronJob } from 'cron'; // Aggiungi CronJob per gestire le operazioni pianificate
+import poppler from 'pdf-poppler';
+import FormData from 'form-data'; // Importa form-data
 
-const __filename = fileURLToPath(import.meta.url); // Define __filename
-const __dirname = dirname(__filename); // Define __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -38,54 +36,52 @@ async function downloadPdf(url, outputPath) {
     fs.writeFileSync(outputPath, response.data);
 }
 
-// Funzione per analizzare il testo estratto dal PDF
-const getParsedMenu = (pageContents) => {
-    const inputCombinazioni = pageContents[1];
-    const inputPiatti = pageContents[2];
-    const inputPinse = pageContents[3];
-    const inputInsalate = pageContents[4];
+// Funzione per inviare l'immagine all'API OCR.Space
+async function ocrSpaceApi(imagePath) {
+    const apiKey = 'K89568537488957'; // La tua chiave API OCR.Space
+    const imageBuffer = fs.readFileSync(imagePath); // Leggi l'immagine convertita dal PDF
 
-    const repeatedBlanksPattern = new RegExp(/\s+/g);
-    const notePattern = new RegExp(/\(.\)/g);
-    const itemPattern = new RegExp(/[a-z]([^]*?€)?.*/gi);
-    const itemNamePattern = new RegExp(/.*?(?=[:€]|$)/i);
-    const itemIngredientsPattern = new RegExp(/(?<=:).*?(?=€|$)/i);
-    const itemPricePattern = new RegExp(/(?<=€).*/);
+    const formData = new FormData();
+    formData.append('file', imageBuffer, { filename: path.basename(imagePath) });
+    formData.append('apikey', apiKey);
 
-    const getText = str => str.replace(/^[^a-z]*/i, '').replace(/[^a-z]*$/i, '') || undefined;
-    const getNumber = str => {
-        const digits = (str.match(/\d+([.,]\d+)?/) || [''])[0];
-        return digits ? Number(digits) : undefined;
+    try {
+        const response = await axios.post('https://api.ocr.space/parse/image', formData, {
+            headers: {
+                ...formData.getHeaders(),
+            },
+        });
+
+        return response.data;
+    } catch (error) {
+        console.error('Errore durante il riconoscimento OCR:', error);
+        throw error;
+    }
+}
+
+// Funzione per convertire il PDF in immagini
+async function pdfToImages(pdfPath) {
+    const outputDir = path.join(__dirname, 'pdf_images');
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir);
+    }
+
+    const options = {
+        format: 'png',
+        out_dir: outputDir,
+        out_prefix: 'menu_image',
+        page: [3, 4, 5] // Estrai solo le pagine 3, 4 e 5
     };
 
-    const getName = item => getText((item.match(itemNamePattern) || [''])[0]);
-    const getIngredients = item => getText((item.match(itemIngredientsPattern) || [''])[0]);
-    const getPrice = item => getNumber((item.match(itemPricePattern) || [''])[0]);
-
-    const getItems = block => (
-        block.replace(notePattern, '').match(itemPattern) || []
-    ).map(itemText => itemText.replace(repeatedBlanksPattern, ' '));
-
-    const getMenuEntry = item => {
-        const name = getName(item) || item;
-        const ingredients = getIngredients(item);
-        const price = getPrice(item);
-        return Object.assign({ name },
-            ingredients !== undefined && { ingredients },
-            price !== undefined && { price }
-        );
-    };
-
-    const sections = {
-        combinazioni: inputCombinazioni,
-        pinse: inputPinse,
-        primi: inputPiatti,
-        secondi: inputPiatti,
-        insalate: inputInsalate
-    };
-
-    return Object.fromEntries(Object.entries(sections).map(([sectionName, block]) => [sectionName, getItems(block).map(item => getMenuEntry(item))]));
-};
+    try {
+        await poppler.convert(pdfPath, options);
+        const imageFiles = fs.readdirSync(outputDir).map(file => path.join(outputDir, file));
+        return imageFiles; // Restituisce i percorsi delle immagini generate
+    } catch (error) {
+        console.error('Errore durante la conversione del PDF in immagini:', error);
+        throw error;
+    }
+}
 
 // Funzione per aggiornare il menu
 const updateMenu = async () => {
@@ -97,82 +93,125 @@ const updateMenu = async () => {
         await downloadPdf(pdfUrl, pdfPath);
 
         // Converti il PDF in immagini
-        const pdfBuffer = fs.readFileSync(pdfPath);
-        const pdfDoc = await PDFDocument.load(pdfBuffer);
-        const images = [];
+        const images = await pdfToImages(pdfPath);
 
-        for (let i = 0; i < pdfDoc.getPageCount(); i++) {
-            const page = pdfDoc.getPage(i);
-            const { width, height } = page.getSize();
-            const canvas = createCanvas(width, height);
-            const context = canvas.getContext('2d');
-
-            // Imposta la dimensione del canvas
-            const scale = 2; // Modifica il valore di scala se necessario
-            canvas.width = width * scale;
-            canvas.height = height * scale;
-
-            // Imposta il colore di sfondo
-            context.fillStyle = 'white';
-            context.fillRect(0, 0, canvas.width, canvas.height);
-
-            // Renderizza il contenuto della pagina sul canvas
-            // Nota: La libreria pdf-lib non supporta il rendering diretto come immagini, quindi
-            // in questo caso dovresti trovare un modo per disegnare il contenuto della pagina.
-            // Potresti dover utilizzare una libreria aggiuntiva per ottenere le immagini delle pagine.
-
-            // Salva l'immagine come PNG
-            const imgPath = path.join(__dirname, `menu_image_${i}.png`);
-            const buffer = canvas.toBuffer('image/png');
-            fs.writeFileSync(imgPath, buffer);
-            images.push(imgPath);
-        }
-
-        // Passa le immagini a Tesseract
         const allPageTexts = [];
+
+        // Esegui il riconoscimento OCR su ogni immagine
         for (const imgPath of images) {
-            const langsArr = ['ita']; // Inizializzazione dell'array delle lingue
-            console.log('Lingue passate a Tesseract:', langsArr);
-
-            // Controllo se langsArr è un array prima di chiamare map
-            if (Array.isArray(langsArr)) {
-                const langString = langsArr.join('+'); // Unisci le lingue in una stringa con '+'
-                console.log('Tipo di lang prima di Tesseract:', typeof langString, Array.isArray(langString) ? 'È un array' : 'Non è un array');
-
-                // Tenta di riconoscere il testo
-                try {
-                    const pageText = await tesseract.recognize(imgPath, {
-                        lang: langString,
-                        dpi: 256
-                    });
-                    allPageTexts.push(pageText.data.text);
-                } catch (error) {
-                    console.error('Errore durante l\'estrazione del testo da', imgPath, error);
-                }
-            } else {
-                console.error('langsArr non è un array:', langsArr);
-            }
+            const ocrResult = await ocrSpaceApi(imgPath);
+            const pageText = ocrResult.ParsedResults[0].ParsedText;
+            allPageTexts.push(pageText);
         }
 
-        // Analizza il menu
-        const menu = getParsedMenu(allPageTexts);
+        // Creazione dell'oggetto menu JSON
+        const menuData = {
+            combinazioni: [],
+            piatti: [],
+            prezzi: [],
+            allergeni: [],
+        };
 
-        // Salva il menu nel database
+        // Le categorie da estrarre
+        const categories = ['Primi', 'Secondi', 'Contorni', 'Piatti Unici', 'Le Nostre Pinse', 'Insalatone'];
+        const categoryData = {};
+
+        categories.forEach(category => {
+            categoryData[category] = [];
+        });
+
+        // Analizza il testo e riempi l'oggetto menuData
+        allPageTexts.forEach(text => {
+            const lines = text.split('\n');
+            let currentCategory = null;
+
+            lines.forEach(line => {
+                line = line.trim(); // Rimuove spazi bianchi
+
+                // Controlla se la riga è una delle categorie
+                if (categories.includes(line)) {
+                    currentCategory = line; // Imposta la categoria corrente
+                } else if (currentCategory && line.includes('€')) {
+                    const priceMatch = line.match(/€\s*\d+(\.\d+)?/);
+                    const itemName = line.replace(/(\s*€\s*\d+(\.\d+)?)/, '').trim(); // Rimuove il prezzo dal nome
+
+                    // Aggiunge l'elemento all'oggetto della categoria corrente
+                    if (priceMatch) {
+                        categoryData[currentCategory].push({
+                            name: itemName,
+                            price: priceMatch[0],
+                        });
+                    }
+                } else if (currentCategory && line.length > 0) {
+                    // Se la riga è un piatto ma non contiene un prezzo, aggiungila come piatto (senza prezzo)
+                    categoryData[currentCategory].push({
+                        name: line,
+                        price: null,
+                    });
+                }
+            });
+        });
+
+        // Aggiungi i dati delle categorie all'oggetto menuData
+        Object.keys(categoryData).forEach(category => {
+            menuData.piatti.push(...categoryData[category]);
+        });
+
         const db = await connectDB();
-        await db.query('INSERT INTO menus (menu_data) VALUES (?)', [JSON.stringify(menu)]);
-        console.log("Menu aggiornato nel database:", menu);
+        await db.query('INSERT INTO menus (menu_data) VALUES (?)', [JSON.stringify(menuData)]);
+        console.log('Menu aggiornato nel database:', menuData);
     } catch (error) {
         console.error('Errore durante l\'aggiornamento del menù:', error);
     }
 };
 
+// Funzione per inviare gli ordini a Telegram
+async function sendOrdersToTelegram() {
+    try {
+        const db = await connectDB();
+        const [orders] = await db.query('SELECT * FROM orders');
+
+        if (orders.length > 0) {
+            const message = orders.map(order => `Ordine ID: ${order.id}, Piatto ID: ${order.menu_item_id}, Quantità: ${order.quantity}`).join('\n');
+            await axios.post(`https://api.telegram.org/bot<YOUR_BOT_TOKEN>/sendMessage`, {
+                chat_id: '<YOUR_CHAT_ID>',
+                text: message,
+            });
+            console.log('Ordini inviati a Telegram con successo');
+        }
+    } catch (error) {
+        console.error('Errore nell\'invio degli ordini a Telegram:', error);
+    }
+}
+
+// Funzione per eliminare gli ordini più vecchi di tre giorni
+async function deleteOldOrders() {
+    const db = await connectDB();
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    await db.query('DELETE FROM orders WHERE created_at < ?', [threeDaysAgo]);
+}
+
+// Imposta il cron job per inviare gli ordini ogni giorno alle 12:45
+const job = new CronJob('45 12 * * *', sendOrdersToTelegram);
+job.start();
+
+// Imposta il cron job per eliminare gli ordini ogni giorno alle 14:00
+const deleteJob = new CronJob('0 14 * * *', deleteOldOrders);
+deleteJob.start();
+
 // Endpoint per estrarre il menù
 app.get('/menu', async (req, res) => {
     try {
-        await updateMenu(); // Chiama updateMenu per assicurarti che il menu sia aggiornato
+        await updateMenu();
         const db = await connectDB();
         const [menus] = await db.query('SELECT * FROM menus ORDER BY created_at DESC LIMIT 1');
-        res.json(menus[0].menu_data);
+        if (menus.length > 0) {
+            const menuData = menus[0].menu_data; // Mantieni come stringa
+            console.log('Menu Data:', menuData); // Log per controllare i dati
+            res.json(JSON.parse(menuData)); // Restituisce i dati in formato JSON
+        } else {
+            res.status(404).send('Nessun menù trovato');
+        }
     } catch (error) {
         console.error('Errore nel recupero del menù:', error);
         res.status(500).send('Errore nel recupero del menù');
@@ -192,40 +231,6 @@ app.post('/order', async (req, res) => {
         res.status(500).send('Errore durante l\'invio dell\'ordine');
     }
 });
-
-// Funzione per inviare gli ordini a Telegram
-async function sendOrdersToTelegram() {
-    try {
-        const db = await connectDB();
-        const [orders] = await db.query('SELECT * FROM orders'); // Recupera gli ordini
-
-        if (orders.length > 0) {
-            const message = orders.map(order => `Ordine ID: ${order.id}, Piatto ID: ${order.menu_item_id}, Quantità: ${order.quantity}`).join('\n');
-            await axios.post(`https://api.telegram.org/botY7692172708:AAGu2XKgpQaJZuh8t7fhpdrE2bJSoEtyCJE/sendMessage`, {
-                chat_id: '884749209',
-                text: message,
-            });
-            console.log('Ordini inviati a Telegram con successo');
-        }
-    } catch (error) {
-        console.error('Errore nell\'invio degli ordini a Telegram:', error);
-    }
-}
-
-// Imposta il cron job per inviare gli ordini ogni giorno alle 12:45
-const job = new CronJob('45 12 * * *', sendOrdersToTelegram);
-job.start();
-
-// Funzione per eliminare gli ordini più vecchi di tre giorni
-async function deleteOldOrders() {
-    const db = await connectDB();
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
-    await db.query('DELETE FROM orders WHERE created_at < ?', [threeDaysAgo]);
-}
-
-// Imposta il cron job per eliminare gli ordini ogni giorno alle 14:00
-const deleteJob = new CronJob('0 14 * * *', deleteOldOrders);
-deleteJob.start();
 
 // Avvio del server
 const PORT = process.env.PORT || 5001;

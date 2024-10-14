@@ -1,0 +1,27 @@
+{
+  "name": "learning_platform2_be",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "private": true,
+  "dependencies": {
+    "axios": "^1.7.7",
+    "canvas": "^2.11.2",
+    "cors": "^2.8.5",
+    "cron": "^3.1.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "fs-extra": "^11.2.0",
+    "mysql2": "^3.11.3",
+    "node-fetch": "^2.7.0",
+    "pdf-img-convert": "^2.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^2.10.377",
+    "sharp": "^0.33.5",
+    "tesseract.js": "^5.1.1"
+  }
+}
